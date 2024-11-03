@@ -1,0 +1,55 @@
+def visualize_classes(data):
+
+    class_counts = count_classes(data)
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(class_counts.keys(), class_counts.values(), color='skyblue')
+    plt.xlabel('Classes')
+    plt.ylabel('Number of samples')
+    plt.xticks(rotation=45)
+    plt.show()
+
+def visualize_classes_v2(data):
+
+    class_counts = count_classes_v2(data)
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(class_counts.keys(), class_counts.values(), color='skyblue')
+    plt.xlabel('Classes')
+    plt.ylabel('Number of samples')
+    plt.xticks(rotation=45)
+    plt.show()
+
+def visualize_sample_images(data):
+    plt.figure(figsize=(24, 12))
+    for images, labels in data.take(1):
+        for i in range(32):
+            plt.subplot(4, 8, i + 1)
+            plt.imshow(np.array(images[i]).astype("uint8"))
+            plt.title(class_names[labels[i]])
+            plt.axis("off")
+
+def count_classes(data):
+    class_counts = {class_name: 0 for class_name in class_names}
+    for images, labels in data:
+        for label in labels:
+            class_name = class_names[label]
+            class_counts[class_name] += 1
+
+    return class_counts
+
+def count_classes_v2(data):
+    class_counts = {class_name: 0 for class_name in class_names}
+    for image, label in data:
+        class_name = class_names[label]
+        class_counts[class_name] += 1
+
+    return class_counts
+
+def count_classes_in_predicted_labels(y_pred):
+    class_counts = {class_name: 0 for class_name in class_names}
+    for label in y_pred:
+        class_name = class_names[label]
+        class_counts[class_name] += 1
+
+    return class_counts

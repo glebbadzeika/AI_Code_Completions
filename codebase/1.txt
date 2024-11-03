@@ -1,0 +1,338 @@
+from flask import Flask, render_template
+from dotenv import find_dotenv, load_dotenv
+from telethon import TelegramClient
+from telethon.tl.types import (
+    MessageMediaPhoto,
+    MessageMediaDocument,
+    MessageMediaWebPage,
+    WebPageEmpty,
+    WebPage
+)
+
+import os
+import asyncio
+import threading
+import traceback
+import json
+
+# Initialize the Flask app in the global scope
+app = Flask(__name__)
+
+
+class ChannelViewer:
+    def __init__(self):
+        self.channel_username = 'onlinerby'  # Replace with the target channel's username
+        self.messages = []
+        self.messages_lock = threading.Lock()
+        self.load_environment_variables()
+
+        # Store API credentials
+        self.api_id = os.getenv('API_ID')
+        self.api_hash = os.getenv('API_HASH')
+
+        # Initialize variables
+        self.last_message_id = 0  # To keep track of the last processed message ID
+
+        # Load existing messages from file
+        self.load_messages()
+
+        # Start the background thread
+        self.start_fetching_messages()
+
+    def load_environment_variables(self):
+        """
+        Load environment variables from a .env file.
+        """
+        try:
+            dotenv_path = find_dotenv()
+            if not dotenv_path:
+                raise FileNotFoundError(".env file not found")
+            load_dotenv(dotenv_path)
+            print(f"Environment variables loaded from {dotenv_path}")
+        except Exception as e:
+            print(f"Error loading .env file: {e}")
+            raise
+
+    def load_messages(self):
+        """
+        Load messages from 'messages.json' if it exists.
+        """
+        try:
+            with open('messages.json', 'r', encoding='utf-8') as f:
+                self.messages = json.load(f)
+            if self.messages:
+                # Update last_message_id with the highest message ID
+                self.last_message_id = max(msg['id'] for msg in self.messages)
+            print(f"Loaded {len(self.messages)} messages from messages.json.")
+        except FileNotFoundError:
+            print("messages.json not found. Starting with an empty message list.")
+        except Exception as e:
+            print(f"Error loading messages: {e}")
+
+    def save_messages(self):
+        """
+        Save messages to 'messages.json'.
+        """
+        try:
+            with open('messages.json', 'w', encoding='utf-8') as f:
+                json.dump(self.messages, f, ensure_ascii=False, indent=4)
+            print(f"Saved {len(self.messages)} messages to messages.json.")
+        except Exception as e:
+            print(f"Error saving messages: {e}")
+
+    def start_fetching_messages(self):
+        print('Starting background thread to fetch messages.')
+        fetch_thread = threading.Thread(target=self.fetch_messages)
+        fetch_thread.daemon = True  # Daemonize thread to exit when main program exits
+        fetch_thread.start()
+        print('Background thread started.')
+
+    def fetch_messages(self):
+        print('fetch_messages: Started fetching messages.')
+        # Set up a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def main():
+            try:
+                print('fetch_messages: Starting main function.')
+
+                # Initialize the Telegram client in this thread's event loop
+                self.client = TelegramClient('session_name', self.api_id, self.api_hash, loop=loop)
+
+                # Start the client (connect and authenticate)
+                await self.client.start()
+                print('Telegram client started in background thread.')
+
+                # Initialize variables
+                offset_id = 0  # Start from the latest message
+                limit = 50  # Number of messages to fetch in each batch
+
+                while True:
+                    print('Fetching new messages...')
+                    new_messages = []
+                    media_groups = {}
+
+                    # Fetch messages in batches
+                    messages = await self.client.get_messages(
+                        self.channel_username,
+                        limit=limit,
+                        offset_id=offset_id
+                    )
+
+                    if not messages:
+                        print('No new messages found.')
+                        await asyncio.sleep(5)  # Wait before checking again
+                        continue
+
+                    for message in reversed(messages):  # Process from oldest to newest
+                        print(f'Processing message ID {message.id}')
+                        message_data = {
+                            'id': message.id,
+                            'text': message.text or '',
+                            'date': message.date.strftime('%Y-%m-%d %H:%M:%S'),
+                            'sender': message.sender_id,
+                            'media': [],
+                            'media_type': None,
+                            'grouped_id': message.grouped_id,
+                        }
+
+                        # Check if the message has media
+                        if message.media:
+                            print(f'Message ID {message.id} has media.')
+                            # Ensure the directory exists
+                            media_dir = 'static/media/'
+                            os.makedirs(media_dir, exist_ok=True)
+
+                            # Initialize variables
+                            media_filename = None
+                            media_item = {}
+
+                            # Handle different media types
+                            if isinstance(message.media, MessageMediaPhoto):
+                                # For photos
+                                file_extension = '.jpg'
+                                media_filename = f"{message.id}{file_extension}"
+                                file_path = os.path.join(media_dir, media_filename)
+
+                                if not os.path.exists(file_path):
+                                    await message.download_media(file=file_path)
+                                    print(f'Downloaded photo for message ID {message.id}: {media_filename}')
+                                else:
+                                    print(f'Photo for message ID {message.id} already exists: {media_filename}')
+
+                                media_item = {
+                                    'file_path': file_path,
+                                    'media_type': 'photo',
+                                    'media_filename': media_filename
+                                }
+
+                            elif isinstance(message.media, MessageMediaDocument):
+                                # For documents (including videos, audio, etc.)
+                                file_extension = self.get_media_extension(message)
+                                media_filename = f"{message.id}{file_extension}"
+                                file_path = os.path.join(media_dir, media_filename)
+
+                                if not os.path.exists(file_path):
+                                    await message.download_media(file=file_path)
+                                    print(f'Downloaded document for message ID {message.id}: {media_filename}')
+                                else:
+                                    print(f'Document for message ID {message.id} already exists: {media_filename}')
+
+                                media_item = {
+                                    'file_path': file_path,
+                                    'media_type': 'document',
+                                    'media_filename': media_filename
+                                }
+
+                            elif isinstance(message.media, MessageMediaWebPage):
+                                # Handle web page previews
+                                print(f'Message ID {message.id} contains a web page preview.')
+                                webpage = message.media.webpage
+
+                                if isinstance(webpage, WebPage):
+                                    # Full web page preview
+                                    message_data['webpage'] = {
+                                        'url': webpage.url,
+                                        'title': getattr(webpage, 'title', ''),
+                                        'description': getattr(webpage, 'description', '')
+                                    }
+                                    print(
+                                        f"Extracted webpage info for message ID {message.id}: {message_data['webpage']}")
+                                elif isinstance(webpage, WebPageEmpty):
+                                    # Empty web page preview
+                                    print(f'Message ID {message.id} contains an empty web page preview.')
+                                    message_data['webpage'] = {
+                                        'url': '',
+                                        'title': '',
+                                        'description': ''
+                                    }
+                                else:
+                                    # Other web page types
+                                    print(
+                                        f'Message ID {message.id} contains an unsupported web page type: {type(webpage)}')
+                                    message_data['webpage'] = {
+                                        'url': '',
+                                        'title': '',
+                                        'description': ''
+                                    }
+
+                                # Add to new_messages and skip further processing
+                                new_messages.append(message_data)
+                                continue  # Skip to next message
+
+                            else:
+                                # Unsupported media type
+                                print(f'Message ID {message.id} has unsupported media type: {type(message.media)}')
+                                continue  # Skip this message
+
+                            # Update message data
+                            if media_item:
+                                message_data['media'].append(media_item)
+                                message_data['media_type'] = media_item['media_type']
+
+                        # Group messages by grouped_id if they are part of a media group
+                        if message.grouped_id:
+                            print(f'Message ID {message.id} is part of group {message.grouped_id}')
+                            if message.grouped_id not in media_groups:
+                                # First message in the group; store the text (caption) if available
+                                media_groups[message.grouped_id] = message_data
+                            else:
+                                # Append media to existing group
+                                existing_message = media_groups[message.grouped_id]
+                                existing_message['media'].extend(message_data['media'])
+                                # If the existing message doesn't have text, and current message has text, update it
+                                if not existing_message['text'] and message_data['text']:
+                                    existing_message['text'] = message_data['text']
+                                    print(
+                                        f'Updated text for media group {message.grouped_id}: "{message_data["text"]}"')
+                        else:
+                            # Not part of a media group, add as individual message
+                            new_messages.append(message_data)
+
+                        # Update last_message_id
+                        if message.id > self.last_message_id:
+                            self.last_message_id = message.id
+
+                        # Update offset_id for the next batch
+                        offset_id = message.id
+
+                    # Add grouped messages to new_messages
+                    new_messages.extend(media_groups.values())
+
+                    # Sort messages by date (optional)
+                    new_messages.sort(key=lambda x: x['date'], reverse=True)
+
+                    # Update the shared messages list
+                    with self.messages_lock:
+                        self.messages.extend(new_messages)
+                        # Remove duplicates based on message ID
+                        self.messages = list({msg['id']: msg for msg in self.messages}.values())
+                        # Sort messages after merging
+                        self.messages.sort(key=lambda x: x['date'], reverse=True)
+
+                    print(f'Fetched and processed {len(new_messages)} new messages.')
+
+                    # Save messages to file
+                    self.save_messages()
+
+                    # Yield control to the event loop
+                    await asyncio.sleep(1)  # Adjust sleep time as needed
+
+            except Exception as e:
+                print(f'An error occurred in fetch_messages: {e}')
+                traceback.print_exc()
+
+        # Run the async function in the event loop
+        try:
+            loop.run_until_complete(main())
+        finally:
+            # Properly disconnect the client
+            self.client.disconnect()
+            loop.close()
+
+    def get_media_extension(self, message):
+        """
+        Get the file extension for the media.
+        """
+        if message.photo:
+            return '.jpg'
+        elif message.video:
+            return '.mp4'
+        elif message.document:
+            # Get the extension from the mime type or file name
+            mime_type = message.document.mime_type
+            if mime_type == 'image/jpeg':
+                return '.jpg'
+            elif mime_type == 'image/png':
+                return '.png'
+            elif mime_type == 'video/mp4':
+                return '.mp4'
+            else:
+                # Extract extension from file name
+                if message.file and message.file.name:
+                    return os.path.splitext(message.file.name)[1]
+                else:
+                    return ''
+        else:
+            return ''
+
+    def get_channel_messages(self):
+        with self.messages_lock:
+            return self.messages.copy()
+
+
+# Instantiate the ChannelViewer class
+viewer = ChannelViewer()
+
+
+@app.route('/')
+def index():
+    print('Received request for /')
+    messages = viewer.get_channel_messages()
+    print(f"Number of messages to display: {len(messages)}")
+    return render_template('index.html', messages=messages)
+
+
+if __name__ == '__main__':
+    app.run(debug=True, use_reloader=False)
